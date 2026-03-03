@@ -209,6 +209,12 @@ def parse_cfd_json(filepath):
     total_revenue_pln = 0.0
     total_cost_pln = 0.0
     
+    crypto_revenue_pln = 0.0
+    crypto_cost_pln = 0.0
+    
+    # We assume CFDs with tickers containing these crypto names are Cryptocurrencies
+    crypto_tickers = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOGE', 'SOL', 'DOT', 'LINK', 'UNI', 'AVAX'] 
+    
     print("\n--- Parsowanie CFD ---")
     
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -219,6 +225,9 @@ def parse_cfd_json(filepath):
         
         # Fees are added to costs
         if t in ['FEE_FX', 'FEE_OVERNIGHT']:
+             ticker = item.get('code', '')
+             is_crypto = any(crypto in ticker for crypto in crypto_tickers)
+             
              # Fees from CFD in latest Trading212 JSONs are typically in Account Currency (PLN)
              fee = 0.0
              if 'interestInAccountCurrency' in item:
@@ -228,10 +237,16 @@ def parse_cfd_json(filepath):
                  
              # A negative fee is a cost (we keep costs positive in our logic)
              if fee < 0:
-                total_cost_pln += abs(fee)
+                 if is_crypto:
+                     crypto_cost_pln += abs(fee)
+                 else:
+                     total_cost_pln += abs(fee)
              elif fee > 0:
-                # Jeśli opłata była dodatnia (bardzo rzadkie, ale możliwe np. przy short overnight), to obniża koszty lub zwiększa przychód
-                total_cost_pln -= fee 
+                 # Jeśli opłata była dodatnia (bardzo rzadkie, ale możliwe np. przy short overnight), to obniża koszty lub zwiększa przychód
+                 if is_crypto:
+                     crypto_cost_pln -= fee
+                 else:
+                     total_cost_pln -= fee 
                 
         elif t == 'POSITION':
              try:
@@ -247,20 +262,33 @@ def parse_cfd_json(filepath):
                  rate_open = get_nbp_rate(curr, open_date)
                  rate_close = get_nbp_rate(curr, close_date)
                  
+                 ticker = item.get('code', '')
+                 is_crypto = any(crypto in ticker for crypto in crypto_tickers)
+                 
                  if direction.lower() == 'long' or direction.lower() == 'buy':
                      rev = close_price * qty * rate_close
                      cost = open_price * qty * rate_open
-                     total_revenue_pln += rev
-                     total_cost_pln += cost
+                     
+                     if is_crypto:
+                         crypto_revenue_pln += rev
+                         crypto_cost_pln += cost
+                     else:
+                         total_revenue_pln += rev
+                         total_cost_pln += cost
                  elif direction.lower() == 'short' or direction.lower() == 'sell':
                      rev = open_price * qty * rate_open
                      cost = close_price * qty * rate_close
-                     total_revenue_pln += rev
-                     total_cost_pln += cost
+                     
+                     if is_crypto:
+                         crypto_revenue_pln += rev
+                         crypto_cost_pln += cost
+                     else:
+                         total_revenue_pln += rev
+                         total_cost_pln += cost
              except Exception as e:
                  print(f"Błąd w CFD (POSITION): {e}")
                  
-    return total_revenue_pln, total_cost_pln
+    return total_revenue_pln, total_cost_pln, crypto_revenue_pln, crypto_cost_pln
 
 
 def main():
@@ -284,36 +312,60 @@ def main():
     # 2. Oblicz CFD
     cfd_rev, cfd_cost = 0.0, 0.0
     if os.path.exists(cfd_json):
-        cfd_rev, cfd_cost = parse_cfd_json(cfd_json)
+        cfd_rev, cfd_cost, cfd_crypto_rev, cfd_crypto_cost = parse_cfd_json(cfd_json)
     else:
         print(f"Brak pliku CFD. Pomijam: {cfd_json}")
     
     # 3. Podsumowanie
-    total_rev = inv_rev + cfd_rev
-    total_cost = inv_cost + cfd_cost
+    total_rev = inv_rev + cfd_rev + cfd_crypto_rev
+    total_cost = inv_cost + cfd_cost + cfd_crypto_cost
     income = max(0, total_rev - total_cost)
     tax_19 = income * 0.19
     
     div_tax_due = div_gross * 0.19
     div_tax_to_pay = max(0, div_tax_due - div_tax_paid)
     
-    print("\n======= WYNIKI DLA PIT-38 (Platformy Zagraniczne) =======")
-    print(f"Poz. 22 (Przychody z odpłatnego zbycia): {total_rev:.2f} PLN")
-    print(f"  - z czego Akcje/ETF: {inv_rev:.2f} PLN")
-    print(f"  - z czego CFD:       {cfd_rev:.2f} PLN")
+    print("\n======= WYNIKI DLA PIT-38 (Twój e-PIT -> Inne przychody) =======")
+    print("💡 Zaznacz checkbox na dole: [X] Przychody uzyskane za granicą")
     
-    print(f"\nPoz. 23 (Koszty uzyskania przychodów): {total_cost:.2f} PLN")
-    print(f"  - z czego Akcje/ETF: {inv_cost:.2f} PLN")
-    print(f"  - z czego CFD:       {cfd_cost:.2f} PLN")
+    print("\n-- AKCJE, ETF, CFD (w tym CFD na kryptowaluty) --")
+    print(f"Przychód (zł) [Poz. 22 z PIT-38]: {total_rev:.2f}")
+    print(f"Koszty uzyskania przychodów (zł) [Poz. 23 z PIT-38]: {total_cost:.2f}")
     
-    print(f"\nPoz. 24 (Dochód) lub Poz. 25 (Strata): {(total_rev - total_cost):.2f} PLN")
+    print("\n-- KRYPTOWALUTY --")
+    print("Przychód (zł) [Poz. 36 z PIT-38]: 0.00 (Twój rachunek to CFD, a nie fizyczne krypto!)")
+    print("Koszty uzyskania przychodów (zł) [Poz. 37 z PIT-38]: 0.00")
+    
+    print("\n-- STRATY Z LAT UBIEGŁYCH --")
+    print("Koszty uzyskania przychodów poniesione w latach ubiegłych... [Poz. 38 z PIT-38]:")
+    print(" -> 0.00 (lub wpisz własną kwotę, jeśli rozliczasz stratę z poprzednich lat)")
+    
+    print(f"\n-- SZCZEGÓŁY INFORMACYJNE (Zysk/Strata: {(total_rev - total_cost):.2f} PLN) --")
+    print(f"  - Przychody z Akcji/ETF:    {inv_rev:.2f} PLN")
+    print(f"  - Przychody z CFD (zwykłe): {cfd_rev:.2f} PLN")
+    print(f"  - Przychody z CFD (krypto): {cfd_crypto_rev:.2f} PLN")
+    print(f"  - Koszty Akcji/ETF:         {inv_cost:.2f} PLN")
+    print(f"  - Koszty CFD (zwykłe):      {cfd_cost:.2f} PLN")
+    print(f"  - Koszty CFD (krypto):      {cfd_crypto_cost:.2f} PLN")
     if income > 0:
          print(f"-> Podatek należny (19%): {tax_19:.2f} PLN")
+         print("   (Zysk oznacza też wymóg dodania załącznika PIT/ZG i wpisania przychodów per kraj)")
     
     print("\n--- ZRYCZAŁTOWANY PODATEK OD DYWIDEND ZAGRANICZNYCH (SEKCJA G) ---")
     print(f"Poz. 47 (Zryczałtowany podatek obliczony - 19% w PL od kwoty brutto): {div_tax_due:.2f} PLN")
     print(f"Poz. 48 (Podatek zapłacony za granicą): {div_tax_paid:.2f} PLN")
     print(f"-> Różnica do dopłaty w Polsce: {div_tax_to_pay:.2f} PLN")
+
+    print("\n======= WYNIKI DLA PIT-ZG (DOCHODY Z ZAGRANICY) =======")
+    print("💡 System e-PIT: Dodaj załącznik PIT/ZG -> 'Inne przychody uzyskane za granicą'")
+    if income > 0:
+        print("Państwo uzyskania dochodu: wpisz kraj siedziby Twojego oddziału Trading 212 (najczęściej Cypr [CY])")
+        print(f"Dochód uzyskany za granicą (zł) [Poz. 29 z PIT-ZG]: {income:.2f}")
+        print("Podatek od tych dochodów zapłacony za granicą (zł) [Poz. 30 z PIT-ZG]: 0.00")
+    else:
+        print("Osiągnąłeś stratę z transakcji kapitałowych (Przychody <= Koszty).")
+        print("W e-PIT z reguły PIT-ZG dla kapitałów wypełnia się tylko, gdy wystąpił dochód (zysk netto).")
+
     print("=================================================================\n")
 
 if __name__ == "__main__":
